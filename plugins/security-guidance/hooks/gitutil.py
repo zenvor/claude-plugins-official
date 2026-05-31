@@ -26,6 +26,17 @@ GIT_CMD = [
     "git",
     "-c", "core.fsmonitor=false",
     "-c", "core.hooksPath=/dev/null",
+    # core.quotePath=false: emit raw UTF-8 in path-emitting commands instead
+    # of C-quoting non-ASCII bytes (default `"\\303\\201vila/..."` vs
+    # `Ávila/...`). Downstream parsers — both ours (parse_diff_into_files,
+    # extract_file_paths_from_diff) and Python stdlib (os.path.isabs,
+    # os.path.join) — expect raw paths and silently drop / mishandle the
+    # quoted form. Adding the flag globally to GIT_CMD covers every
+    # subprocess.run site that uses the splat — diff feeders, rev-parse
+    # path queries (--show-toplevel, --git-dir, --git-common-dir),
+    # reflog %gs subjects, ls-files, status, etc. — without per-site
+    # flag duplication. See #2082, #2099.
+    "-c", "core.quotePath=false",
 ]
 
 
@@ -222,15 +233,12 @@ def _git_diff_range(repo_root, base, head="HEAD"):
     them reviewed — otherwise unreviewed commits get permanently silenced.
     """
     try:
-        # core.quotePath=false makes git emit raw UTF-8 in `diff --git a/... b/...`
-        # headers instead of C-quoting non-ASCII path bytes (`"a/\303\201vila/..."`
-        # vs `a/Ávila/...`). The downstream `re.match(r'^a/(.+?) b/(.+)$', ...)`
-        # in parse_diff_into_files / extract_file_paths_from_diff matches the
-        # raw form only — quoted headers slip past and the entire file is
-        # silently dropped from review. See #2082 (sibling of #2056 / #2075).
+        # GIT_CMD globally passes core.quotePath=false (see definition) so
+        # non-ASCII paths in `diff --git a/... b/...` headers come through as
+        # raw UTF-8, not C-quoted. Required by the downstream
+        # parse_diff_into_files / extract_file_paths_from_diff regex.
         r = subprocess.run(
-            [*GIT_CMD, "-c", "core.quotePath=false",
-             "diff", "-p", "--no-color", "--no-ext-diff", base, head],
+            [*GIT_CMD, "diff", "-p", "--no-color", "--no-ext-diff", base, head],
             cwd=repo_root, capture_output=True, timeout=30,
         )
         if r.returncode != 0:
@@ -355,8 +363,9 @@ def _git_name_only(cwd, base, include_untracked=False):
     # result.stdout=None, and propagate AttributeError out of the helper.
     # Same fix shape as diffstate._list_untracked. See #2056.
     def _run(env):
+        # core.quotePath=false comes from GIT_CMD globally (see definition).
         result = subprocess.run(
-            [*GIT_CMD, "-c", "core.quotePath=false", "diff", "--name-only", "-z", base],
+            [*GIT_CMD, "diff", "--name-only", "-z", base],
             cwd=cwd, capture_output=True, timeout=30,
             env=env,
         )
@@ -393,9 +402,9 @@ def _git_status_porcelain(cwd):
     # sibling helpers — a non-ASCII path in the worktree would otherwise
     # crash the cp1252 reader thread on Windows. See #2056.
     try:
+        # core.quotePath=false comes from GIT_CMD globally (see definition).
         r = subprocess.run(
-            [*GIT_CMD, "-c", "core.quotePath=false", "status",
-             "--porcelain=v1", "-uall", "-z"],
+            [*GIT_CMD, "status", "--porcelain=v1", "-uall", "-z"],
             cwd=cwd, capture_output=True, timeout=30,
         )
         if r.returncode != 0:
@@ -471,11 +480,8 @@ def get_git_diff(cwd, baseline_sha, full_context=False, paths=None, untracked_pa
         # change exists to fix.
         return ""
 
-    # core.quotePath=false: emit raw UTF-8 in `diff --git a/... b/...` headers
-    # so non-ASCII paths aren't C-quoted past the downstream parse_diff_into_files
-    # regex. See #2082 (sibling of #2056 / #2075).
-    cmd = [*GIT_CMD, "-c", "core.quotePath=false",
-           "diff", "--no-color", "--no-ext-diff", baseline_sha] + (["--unified=99999"] if full_context else []) + pathspec
+    # core.quotePath=false comes from GIT_CMD globally (see definition).
+    cmd = [*GIT_CMD, "diff", "--no-color", "--no-ext-diff", baseline_sha] + (["--unified=99999"] if full_context else []) + pathspec
     try:
         with _temp_index(cwd, untracked_paths) as env:
             # env is None when no index could be found (bare repo / not a
